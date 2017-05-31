@@ -1,0 +1,23 @@
+base_url=http://prdownloads.sourceforge.net/docutils
+version=0.13.1
+package=docutils-$(version).tar.gz
+workdir=$(CACHE_DIR)/docutils-$(version)
+
+.PHONY: default
+default: install
+
+$(CACHE_DIR):
+	mkdir -p $(CACHE_DIR)
+
+$(CACHE_DIR)/$(package): | $(CACHE_DIR)
+	curl -L -o $@ "$(base_url)/$(package)"
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(workdir): $(CACHE_DIR)/$(package) | $(BUILD_DIR)
+	tar -C $(dir $@) -zxf "$<"
+
+.PHONY: install
+install: | $(workdir)
+	cd $(workdir); python setup.py install --prefix=$(BUILD_DIR)

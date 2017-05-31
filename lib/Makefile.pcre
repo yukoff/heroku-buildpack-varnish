@@ -1,5 +1,5 @@
-site=ftp://ftp.csx.cam.ac.uk/pub/software/programming/pcre
-version=8.30
+base_url=ftp://ftp.csx.cam.ac.uk/pub/software/programming/pcre
+version=8.40
 package=pcre-$(version).tar.gz
 workdir=$(CACHE_DIR)/pcre-$(version)
 
@@ -7,13 +7,13 @@ workdir=$(CACHE_DIR)/pcre-$(version)
 default: install
 
 $(CACHE_DIR):
-	mkdir $(CACHE_DIR)
+	mkdir -p $(CACHE_DIR)
 
 $(CACHE_DIR)/$(package): | $(CACHE_DIR)
-	curl -o $@ "$(site)/$(package)"
+	curl -o $@ "$(base_url)/$(package)"
 
 $(BUILD_DIR):
-	mkdir $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)
 
 $(workdir): $(CACHE_DIR)/$(package) | $(BUILD_DIR)
 	tar -C $(dir $@) -zxf "$<"

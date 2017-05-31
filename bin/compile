@@ -1,12 +1,129 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
-BUILD=$(ruby -e 'puts File.expand_path(ARGV[0])' $1)
-CACHE=$(ruby -e 'puts File.expand_path(ARGV[0])' $2)
+# fail hard
+set -o pipefail
+# fail harder
+set -eu
+
+BUILD=$(readlink -f $1)
+CACHE=$(readlink -f $2)
+WORK_DIR=$(readlink -f $(dirname $0)/..)
+
+# PREFIX starting with slash without /app part, eg. as if /app was root
+PREFIX=/.heroku/varnish
 
 # This is probably the wrong way, but whatever. Heroku buildpacks are
 # deliriously confusing.
 [ ! -d $CACHE ] && mkdir -p $CACHE
-curl -o $CACHE/Makefile https://raw.github.com/jordansissel/heroku-buildpack-varnish/master/lib/Makefile
-curl -o $CACHE/Makefile.pcre https://raw.github.com/jordansissel/heroku-buildpack-varnish/master/lib/Makefile.pcre
 
-make -C $CACHE Makefile install BUILD_DIR=$BUILD CACHE_DIR=$CACHE
+pushd $(dirname $0)/../lib/ >/dev/null
+make -C $CACHE -f $WORK_DIR/lib/Makefile install \
+     BUILD_DIR=$BUILD \
+     CACHE_DIR=$CACHE \
+     WORK_DIR=$WORK_DIR
+popd >/dev/null
+
+###
+### varnish requires gcc (and deps) to compile vcl
+### lib dirs are /lib /lib64 /usr/lib
+###
+
+# gcc
+GCC=$(readlink -f $(which gcc))
+cp -a $GCC $(which gcc) ${BUILD}${PREFIX}/bin
+cd ${BUILD}${PREFIX}/bin;
+    ln -sf gcc cc;
+cd -
+cp -ar /usr/lib/gcc ${BUILD}${PREFIX}/lib
+cp -a $(find /lib /lib64 /usr/lib -type f -name 'libgcc*') \
+      ${BUILD}${PREFIX}/lib
+
+# libisl
+cp -a $(find /lib /lib64 /usr/lib -type f -name 'libisl.so*') \
+      ${BUILD}${PREFIX}/lib
+LIBISL=$(basename $(find ${BUILD}${PREFIX}/lib -type f -name 'libisl.so*'))
+cd ${BUILD}${PREFIX}/lib;
+    if [ "$LIBISL" != "libisl.so.15" ]; then
+        ln -sf $LIBISL libisl.so.15;
+    fi
+    if [ "$LIBISL" != "libisl.so" ]; then
+        ln -sf $LIBISL libisl.so;
+    fi
+cd -
+
+# libmpc
+cp -a $(find /lib /lib64 /usr/lib -type f -name 'libmpc.so*') ${BUILD}${PREFIX}/lib
+LIBMPC=$(basename $(find ${BUILD}${PREFIX}/lib -type f -name 'libmpc.so*'))
+cd ${BUILD}${PREFIX}/lib;
+    if [ "$LIBMPC" != "libmpc.so.3" ]; then
+        ln -sf $LIBMPC libmpc.so.3;
+    fi
+    if [ "$LIBMPC" != "libmpc.so" ]; then
+        ln -sf $LIBMPC libmpc.so;
+    fi
+cd -
+
+# libmpfr
+cp -a $(find /lib /lib64 /usr/lib -type f -name 'libmpfr.so*') ${BUILD}${PREFIX}/lib
+LIBMPFR=$(basename $(find ${BUILD}${PREFIX}/lib -type f -name 'libmpfr.so*'))
+cd ${BUILD}${PREFIX}/lib;
+    if [ "$LIBMPFR" != "libmpfr.so.4" ]; then
+        ln -sf $LIBMPFR libmpfr.so.4;
+    fi
+    if [ "$LIBMPFR" != "libmpfr.so" ]; then
+        ln -sf $LIBMPFR libmpfr.so;
+    fi
+cd -
+
+# as
+AS=$(readlink -f $(which as))
+cp -a $AS $(which as) ${BUILD}${PREFIX}/bin
+cp -a $(find /lib /lib64 /usr/lib -type f -name 'libopcodes*.so*') \
+      $(find /lib /lib64 /usr/lib -type f -name 'libbfd*.so*') \
+      ${BUILD}${PREFIX}/lib
+
+# ld
+LD=$(which ld)
+cp -a $LD ${BUILD}${PREFIX}/bin
+while [ -n "$(readlink $LD)" -a "$(readlink $LD)" != "$(basename $LD)" ]; do
+    LD=$(which $(readlink $LD))
+    if [ "$LD" != "$(readlink -f $LD)" ]; then
+        cp -a $LD $(readlink -f $LD) ${BUILD}${PREFIX}/bin
+    else
+        cp -a $LD ${BUILD}${PREFIX}/bin
+    fi
+done
+
+find /lib /lib64 /usr/lib -type f -name 'libpthread.so*'
+find /lib /lib64 /usr/lib -type f -name 'libc.so*'
+cp -a $(find /lib /lib64 /usr/lib -type f -name 'libpthread.so*') \
+      $(find /lib /lib64 /usr/lib -type f -name 'libpthread_nonshared.a*') \
+      $(find /lib /lib64 /usr/lib -type f -name 'libc.so*') \
+      $(find /lib /lib64 /usr/lib -type f -name 'libc_nonshared.a*') \
+      $(find /lib /lib64 /usr/lib -type f -name 'crti.o*') \
+      $(find /lib /lib64 /usr/lib -type f -name 'crtn.o*') \
+      ${BUILD}${PREFIX}/lib
+sed -i -re 's/\/usr\/lib\/[^\/]+\/(libpthread_nonshared.a)/\/app\/.heroku\/varnish\/lib\/\1/' \
+    ${BUILD}${PREFIX}/lib/libpthread.so
+sed -i -re 's/\/usr\/lib\/[^\/]+\/(libc_nonshared.a)/\/app\/.heroku\/varnish\/lib\/\1/' \
+    ${BUILD}${PREFIX}/lib/libc.so
+
+# cleanup includes (and man?) - nope, seems required by gcc
+#rm -rf ${BUILD}${PREFIX}/include
+
+# copy our binaries over
+mkdir -p ${BUILD}/vendor/heroku/heroku-buildpack-varnish
+cp -r $WORK_DIR/* ${BUILD}/vendor/heroku/heroku-buildpack-varnish/
+# relbins
+mkdir -p ${BUILD}/vendor/bin
+for file in $(ls $WORK_DIR/bin/heroku*); do
+    cd ${BUILD}/vendor/bin
+    ln -sf ../heroku/heroku-buildpack-varnish/bin/$(basename $file) .
+    cd -
+done
+
+# echo '>>>>>> List of app files:'
+# find ${BUILD}
+
+# echo '>>>>>> Cache:'
+# find ${CACHE}

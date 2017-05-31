@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+
+# fail hard
+set -o pipefail
+# fail harder
+set -eu
+# for ${DOCUMENT_ROOT%%*(/)} pattern further down
+shopt -s extglob
+# for detecting when -l 'logs/*.log' matches nothing
+shopt -s nullglob
+
+# find a free port
+function get_free_port() {
+    python -c "import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(('', 0))
+addr = s.getsockname()
+print(addr[1])
+s.close()"
+}
+
+function vcl_preprocess() {
+    local vcl_file=$1
+    local backend_port=$2
+    sed -re "/backend default/,/\}/{
+      s/(\.port[[:space:]]*=[[:space:]]*["\""'])[[:digit:]]+(["\""'])/\1${backend_port}\2/
+    }" $vcl_file
+}
+
+function usage() {
+    cat - <<__USAGE__
+Usage: $0 -f <config.vcl> <script> [ parameters ]
+
+    -f <config.vcl> - path to vcl file to use
+    <script>        - startup script to be executed next
+                      eg. heroku-php-apache2 etc
+    [ parameters ]  - optional parameters for the startup script
+
+NOTE: Do not provide -p \$PORT for startup script as \$PORT will be used by
+      varnish. This script will allocate free port and pass it to startup
+      script via -p parameter.
+
+__USAGE__
+    exit ${1:-1}
+}
+
+# better handle with getopt
+if [ 3 -gt $# ]; then usage; fi
+if [ '-f' != "$1" ]; then usage; fi
+set -x
+BACKEND_PORT=$(get_free_port)
+VCL_CONFIG=$2 && shift 2
+STARTUP_SCRIPT=$1 && shift
+VARNISH_DIR=/app/vendor/varnish/var/varnish
+VCL_CONFIG_READY=$VARNISH_DIR/$(basename $VCL_CONFIG)
+ARGS=$@
+
+cat - <<__CFG__
+Varnish config
+    backend port: $BACKEND_PORT
+      vcl config: $VCL_CONFIG
+     varnish dir: $VARNISH_DIR
+
+next startup script: $STARTUP_SCRIPT $ARGS
+__CFG__
+
+mkdir -p $VARNISH_DIR /app/var
+ln -sf $VARNISH_DIR /app/var/varnish || true
+# sleep 1; ps aux | grep varnishd
+# export PORT=$BACKEND_PORT
+pids=()
+(
+vcl_preprocess "$VCL_CONFIG" "$BACKEND_PORT" > "$VCL_CONFIG_READY"
+head -13 "$VCL_CONFIG_READY"
+export PATH=/app/vendor/varnish/bin:/app/vendor/varnish/sbin:$PATH \
+       LD_LIBRARY_PATH=/app/vendor/varnish/lib
+      #  LDFLAGS="-L/app/vendor/varnish/lib -R/app/vendor/varnish/lib"
+varnishd -F -f "$VCL_CONFIG_READY" \
+         -a localhost:${PORT:-80} \
+          & pid=$!
+          # -n "$VARNISH_DIR"
+wait
+) & pids+=($!)
+disown $!
+
+set +x
+
+$STARTUP_SCRIPT -p $BACKEND_PORT $ARGS
